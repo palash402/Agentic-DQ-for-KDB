@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-server"
+version = "0.1.0"
+description = "Agentic DQ for KDB — MCP Server with custom xqa_* DQ tools"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { file = "LICENSE" }
+dependencies = [
+    "mcp[cli]>=1.2.0",
+    "pykx>=4.0.0b0",
+    "pydantic-settings",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+    "pytest-cov",
+    "pytest-asyncio",
+    "mypy",
+    "trio",
+]
+
+[project.scripts]
+mcp-server = "mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_server"]
+
+[tool.coverage.run]
+source = ["mcp_server"]
+omit = ["*/_template.py", "*/main.py"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "kdb_live: marks tests that require a live KDB+ instance (deselect with '-m not kdb_live')",
+]
+addopts = "-m 'not kdb_live'"

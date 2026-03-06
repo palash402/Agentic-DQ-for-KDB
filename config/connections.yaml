@@ -1,0 +1,31 @@
+# KDB+ connection profiles.
+# Credentials must NEVER be stored here — use environment variables.
+# The active profile is selected by KDBX_DB_HOST / KDBX_DB_PORT env vars.
+
+connections:
+  default:
+    description: "Local development KDB+ instance"
+    host: "127.0.0.1"
+    port: 5000
+    tls: false
+    timeout_sec: 1
+    retry: 2
+
+  staging:
+    description: "Staging KDB-X instance"
+    host: "${KDB_STAGING_HOST}"    # resolved from environment at runtime
+    port: 5000
+    tls: false
+    timeout_sec: 5
+    retry: 3
+
+  production:
+    description: "Production KDB-X cluster (read-only DQ access)"
+    host: "${KDB_PROD_HOST}"
+    port: 5000
+    tls: true
+    timeout_sec: 10
+    retry: 3
+    notes: >
+      MCP server connects in read-only mode. Never configure INSERT/UPSERT/DELETE
+      access here. DQ tools are strictly read-only — remediation is a separate pipeline.
