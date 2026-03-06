@@ -134,15 +134,20 @@ def aligned_trade_quote_df(sample_syms: list[str]) -> pd.DataFrame:
     """Perfectly aligned trade-quote data (price always == bid or ask)."""
     import numpy as np
 
+    import pandas as pd_inner
+
     rng = np.random.default_rng(42)
     n = 200
     asks = rng.uniform(1001, 5001, size=n).astype(float)
     bids = asks - rng.uniform(0.1, 2.0, size=n)
     # 50% of trades hit ask, 50% hit bid
     prices = [asks[i] if i % 2 == 0 else bids[i] for i in range(n)]
+    base_time = pd_inner.Timestamp("2024-05-08 08:00:00")
+    times = [base_time + pd_inner.Timedelta(seconds=i * 30) for i in range(n)]
 
     return pd.DataFrame({
         "sym": rng.choice(sample_syms, size=n),
+        "time": times,
         "price": prices,
         "bid": bids,
         "ask": asks,
