@@ -3,6 +3,8 @@
 This file provides guidance for AI assistants (Claude and others) working in this repository. It documents the project's purpose, architecture, conventions, and development workflows.
 
 **Reference whitepaper:** [Agentic Workflow for Data Quality — ExeQution Analytics](https://exequtionanalytics.com/wp-content/uploads/2026/01/Agentic-Workflow-for-Data-Quality.pdf)
+**MCP Server source:** [KxSystems/kdb-x-mcp-server](https://github.com/KxSystems/kdb-x-mcp-server)
+**Official docs:** [code.kx.com/kdb-x/integrations/mcp-server](https://code.kx.com/kdb-x/integrations/mcp-server.html)
 
 ---
 
@@ -40,40 +42,48 @@ The project is inspired directly by ExeQution Analytics' research demonstrating 
 
 ## Architecture: MCP-Based Agentic DQ
 
-The core architecture follows the **KDB-X MCP Server** pattern established by KX:
-
 ```
-Claude (LLM client)
+Claude Desktop (natural language client)
     │
     │  natural language prompts
     ▼
-MCP Server (KDB-X MCP Server + custom extensions)
-    ├── TOOLS      → Python/q functions that query the database
-    ├── RESOURCES  → Context files: schemas, venue config, scripts
-    └── PROMPTS    → Auto-generated prompt templates for users
+KDB-X MCP Server  (uv run mcp-server, default port 8000)
+    ├── TOOLS      → Python files in src/mcp_server/tools/  (auto-discovered)
+    ├── RESOURCES  → Python files in src/mcp_server/resources/ (auto-discovered)
+    └── PROMPTS    → Python files in src/mcp_server/prompts/  (auto-discovered)
     │
+    │  q IPC (pykx)
     ▼
-KDB-X Process (trade, quote, reference tables)
+KDB-X / KDB+ process  (default port 5000)
+    └── trade, quote, stockCodes, venueMap tables
 ```
 
-### MCP Concepts
+MCP is a standardised communication framework — like HTTP for web pages, or FIX for orders, but for AI context. It moves metadata about how a model should interpret data and produce results.
 
-| Concept | Role | Examples |
+### Three MCP Concepts
+
+| Concept | Role | How to extend |
 |---|---|---|
-| **Tools** | Functions that query the database | `xqa_get_venue_syms`, `xqa_get_venue_hours`, `xqa_get_index_syms`, alignment tool wrapping `aj` |
-| **Resources** | Context scripts/text files the AI reads to understand data | Table schemas, venue config, `kdbx_describe_tables`, `kdbx_sql_query_guidance` |
-| **Prompts** | Auto-generated prompt templates | `kdbx_table_analysis` |
+| **Tools** | Python functions that query the database and return structured data | Add a `.py` file to `src/mcp_server/tools/` |
+| **Resources** | Text/script files providing context the AI reads (schemas, guidance) | Add a `.py` file to `src/mcp_server/resources/` |
+| **Prompts** | Auto-generated reusable prompt templates for common tasks | Add a `.py` file to `src/mcp_server/prompts/` |
+
+All three are **auto-discovered at server startup** — no manual registration or imports required. Restart the MCP client after adding a new file.
 
 ### Built-in KDB-X MCP Tools (from KX)
 
-- `kdbx_describe_tables` — gives AI a general overview of all tables
-- `kdbx_sql_query_guidance` — supplements SQL tools with query best practices
-- `kdbx_run_sql_query` — translates natural language to SQL, runs in KDB-X
-- `kdbx_table_analysis` — generates a data analysis prompt template
+| Name | Type | Purpose |
+|---|---|---|
+| `kdbx_run_sql_query` | Tool | Execute read-only SELECT queries (1000-row cap, blocks INSERT/DROP/DELETE) |
+| `kdbx_similarity_search` | Tool | Vector similarity search (KDB-X only) |
+| `kdbx_hybrid_search` | Tool | Combined vector + text search (KDB-X only) |
+| `kdbx_describe_tables` | Resource | Overview of all tables with schema and data preview |
+| `kdbx_sql_query_guidance` | Resource | SQL syntax rules, best practices, examples |
+| `kdbx_table_analysis` | Prompt | Dynamic prompt template for deep-dive table analysis |
 
-> **Important:** SQL via `kdbx_run_sql_query` is flexible but slow on large tick data. Prefer custom q-language tool wrappers for performance-sensitive checks.
+> **Important:** `kdbx_run_sql_query` is flexible but **slow** on millions of tick records. Prefer custom q-language tool wrappers for performance-sensitive DQ checks.
 
-### Custom Tools to Implement
+### Custom Tools to Build
 
 Follow the `xqa_` prefix convention for project-specific tools:
 
@@ -85,7 +95,7 @@ Follow the `xqa_` prefix convention for project-specific tools:
 | `xqa_align_trade_quote` | Wraps q's `aj` function for trade-quote timestamp alignment |
 | `xqa_get_condition_codes` | Returns exchange condition code definitions |
 
-New tools should provide **general-purpose context** (venue metadata, schema info, symbol lists) rather than check-specific queries. General tools are reusable; AI generates the specific check logic dynamically.
+New tools should provide **general-purpose context** (venue metadata, schema info, symbol lists), not encode specific DQ check logic. General tools are reusable; AI generates check logic dynamically.
 
 ---
 
@@ -94,12 +104,12 @@ New tools should provide **general-purpose context** (venue metadata, schema inf
 | Layer | Technology |
 |---|---|
 | Database | KDB-X / KDB+/q |
-| MCP Server | KDB-X MCP Server (by KX) |
-| AI client | Claude Desktop / Anthropic API (`claude-sonnet-4-6`) |
+| MCP Server | [KDB-X MCP Server](https://github.com/KxSystems/kdb-x-mcp-server) by KX |
+| AI client | Claude Desktop (connects via streamable-http transport) |
 | Python runtime | Python 3.11+ managed with `uv` |
-| KDB+ Python bridge | `pykx` (preferred) or `qpython` |
+| KDB+ Python bridge | `pykx` (used internally by the MCP server) |
 | q tool wrappers | Native q language (not SQL) for performance |
-| Config | YAML / TOML |
+| Config | `.env` file + Pydantic `BaseSettings` |
 | Testing | `pytest` |
 | Linting | `ruff`, `mypy` |
 | Packaging | `pyproject.toml` / `uv` |
@@ -109,81 +119,311 @@ New tools should provide **general-purpose context** (venue metadata, schema inf
 
 ## Intended Directory Structure
 
+This repo extends the upstream KDB-X MCP Server with custom `xqa_*` tools, resources, and prompts:
+
 ```
 Agentic-DQ-for-KDB/
-├── CLAUDE.md                   # This file
-├── README.md                   # User-facing overview
-├── LICENSE                     # Apache 2.0
-├── pyproject.toml              # Python project config & dependencies
-├── .env.example                # Template for required env vars (never commit .env)
+├── CLAUDE.md                        # This file
+├── README.md                        # User-facing overview
+├── LICENSE                          # Apache 2.0
+├── pyproject.toml                   # Python project config & dependencies
+├── .env.example                     # Template for required env vars (never commit .env)
+├── .env                             # Local config (gitignored)
 ├── .gitignore
 │
 ├── src/
-│   └── agentic_dq/             # Main Python package
-│       ├── __init__.py
-│       ├── mcp/                # MCP server layer
-│       │   ├── __init__.py
-│       │   ├── server.py       # MCP server entry point (extends KDB-X MCP)
-│       │   ├── tools.py        # Custom xqa_* tool registrations
-│       │   ├── resources.py    # Resource file registration (schemas, config)
-│       │   └── prompts.py      # Prompt template definitions
-│       ├── kdb/                # KDB+ integration layer
-│       │   ├── __init__.py
-│       │   ├── connection.py   # KDB+ connection management
-│       │   ├── query.py        # q query builders and executors
-│       │   └── schema.py       # Table schema introspection
-│       ├── dq/                 # DQ check category implementations
-│       │   ├── __init__.py
-│       │   ├── completeness.py # Gap detection, session distribution checks
-│       │   ├── timestamp.py    # Temporal gap analysis, 1-min bin checks
-│       │   ├── validation.py   # Bad data, crossed quotes, outliers, duplicates
-│       │   └── understanding.py# Auction classification, trade-quote alignment
-│       ├── pipeline/           # Orchestration
-│       │   ├── __init__.py
-│       │   ├── runner.py       # DQ pipeline runner
-│       │   └── scheduler.py    # Cron/event-based scheduling
-│       └── reporting/          # Output and alerting
-│           ├── __init__.py
-│           ├── report.py       # DQ report generation
-│           └── alerts.py       # Alert dispatching (Slack, email, etc.)
+│   └── mcp_server/                  # Extends upstream KDB-X MCP Server layout
+│       ├── main.py                  # Server entry point
+│       ├── settings.py              # Pydantic config schema
+│       ├── tools/                   # Auto-discovered MCP tools
+│       │   ├── _template.py         # Copy this to create a new tool
+│       │   ├── xqa_get_venue_syms.py
+│       │   ├── xqa_get_index_syms.py
+│       │   ├── xqa_get_venue_hours.py
+│       │   ├── xqa_align_trade_quote.py
+│       │   └── xqa_get_condition_codes.py
+│       ├── resources/               # Auto-discovered MCP resources
+│       │   ├── _template.py
+│       │   ├── xqa_trade_schema.py  # trade table schema description
+│       │   ├── xqa_quote_schema.py  # quote table schema description
+│       │   └── xqa_venue_guide.py   # venue / auction domain knowledge
+│       ├── prompts/                 # Auto-discovered MCP prompts
+│       │   ├── _template.py
+│       │   └── xqa_dq_analysis.py   # DQ analysis prompt template
+│       └── utils/
+│           ├── db_connection.py     # get_db_connection() helper
+│           └── embeddings.py        # Optional: vector search support
 │
-├── q/                          # KDB+/q scripts (tool wrappers)
-│   ├── init.q                  # Startup / bootstrapping script
+├── q/                               # Native KDB+/q scripts (loaded by tools)
+│   ├── init.q                       # Startup / bootstrapping
 │   ├── tools/
-│   │   ├── venue.q             # xqa_get_venue_syms, xqa_get_venue_hours
-│   │   ├── index.q             # xqa_get_index_syms
-│   │   └── alignment.q         # xqa_align_trade_quote (aj wrapper)
-│   └── utils.q                 # Shared q utilities
+│   │   ├── venue.q                  # .xqa.getVenueSyms, .xqa.getVenueHours
+│   │   ├── index.q                  # .xqa.getIndexSyms
+│   │   └── alignment.q              # .xqa.alignTradeQuote (aj wrapper)
+│   └── utils.q                      # Shared q utilities
 │
 ├── config/
-│   ├── venues.yaml             # Venue trading hours & timezone offsets
-│   ├── indices.yaml            # Index constituent definitions
-│   └── connections.yaml        # KDB+ connection profiles (no credentials)
-│
-├── resources/                  # MCP resource files (context for AI)
-│   ├── schemas/                # Table schema descriptions
-│   │   ├── trade.md
-│   │   └── quote.md
-│   └── guides/                 # Domain knowledge context
-│       ├── auction_types.md
-│       └── condition_codes.md
+│   ├── venues.yaml                  # Venue trading hours & timezone offsets
+│   ├── indices.yaml                 # Index constituent definitions
+│   └── connections.yaml             # KDB+ connection profiles (no credentials)
 │
 ├── tests/
-│   ├── conftest.py             # Shared pytest fixtures
+│   ├── conftest.py
 │   ├── unit/
 │   │   ├── test_tools.py
 │   │   ├── test_dq_checks.py
 │   │   └── test_kdb_query.py
 │   └── integration/
-│       └── test_pipeline.py    # Requires live KDB-X instance
-│
-├── scripts/
-│   └── run_dq.py              # CLI entry point
+│       └── test_pipeline.py         # Requires live KDB-X instance
 │
 └── .github/
     └── workflows/
-        ├── ci.yml             # Run tests and lint on PRs
-        └── release.yml        # Publish releases
+        ├── ci.yml
+        └── release.yml
+```
+
+---
+
+## Setup & Running the MCP Server
+
+### Prerequisites
+
+1. KDB-X or KDB+ running on a host/port
+2. `uv` installed: `pip install uv` or see [astral.sh/uv](https://docs.astral.sh/uv/)
+3. Clone the upstream server and this repo side-by-side, or extend it in-place
+4. Claude Desktop installed (or another MCP-compatible client)
+
+### 1. Start KDB-X / KDB+
+
+```bash
+# Classic KDB+
+q -p 5000
+# then in q: \l s.k_
+
+# KDB-X
+q -p 5000
+# then in q:
+# .ai:use`kx.ai
+# .s.init[]
+```
+
+### 2. Configure Environment
+
+Copy `.env.example` to `.env` and fill in values. **Never commit `.env`.**
+
+```bash
+# KDB-X database connection
+KDBX_DB_HOST=127.0.0.1
+KDBX_DB_PORT=5000
+KDBX_DB_USERNAME=           # optional
+KDBX_DB_PASSWORD=           # optional
+KDBX_DB_TIMEOUT=1
+KDBX_DB_RETRY=2
+KDBX_DB_TLS=false
+
+# MCP server
+KDBX_MCP_TRANSPORT=streamable-http   # or stdio
+KDBX_MCP_HOST=127.0.0.1
+KDBX_MCP_PORT=8000
+KDBX_MCP_LOG_LEVEL=INFO
+
+# Optional: Anthropic (if calling the API directly from tools)
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Optional: alerting
+SLACK_WEBHOOK_URL=
+```
+
+Configuration priority: **CLI args > env vars > .env file > defaults**
+
+### 3. Configure Claude Desktop
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
+or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+
+```json
+{
+  "mcpServers": {
+    "kdbx": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--with", "streamable-http==0.1.4",
+        "--directory", "/path/to/Agentic-DQ-for-KDB",
+        "mcp-server"
+      ],
+      "env": {
+        "KDBX_DB_HOST": "127.0.0.1",
+        "KDBX_DB_PORT": "5000",
+        "KDBX_MCP_TRANSPORT": "streamable-http"
+      }
+    }
+  }
+}
+```
+
+### 4. Run the Server
+
+```bash
+# Defaults: streamable-http on 127.0.0.1:8000, connects to KDB+ on localhost:5000
+uv run mcp-server
+
+# Custom ports
+uv run mcp-server --db.port 5001 --mcp.port 7001
+
+# stdio transport (same-host only, used by some clients)
+uv run mcp-server --mcp.transport stdio
+
+# Debug logging
+uv run mcp-server --mcp.log-level DEBUG
+```
+
+---
+
+## Writing Custom MCP Tools
+
+Every `.py` file placed in `src/mcp_server/tools/` is auto-discovered at startup. Each must expose `get_tool()` and `execute()`.
+
+```python
+# src/mcp_server/tools/xqa_get_venue_hours.py
+from mcp.server.models import Tool
+from src.mcp_server.utils.db_connection import get_db_connection
+import logging
+
+logger = logging.getLogger(__name__)
+
+def get_tool() -> Tool:
+    return Tool(
+        name="xqa_get_venue_hours",
+        description=(
+            "Returns trading session hours, auction timings, and UTC offset "
+            "for a given venue. Use this before any completeness or timestamp check "
+            "to understand expected trading windows and convert to storage timezone."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "venue_code": {
+                    "type": "string",
+                    "description": "Exchange MIC code, e.g. XTKS for Tokyo Stock Exchange"
+                }
+            },
+            "required": ["venue_code"]
+        }
+    )
+
+async def execute(venue_code: str) -> dict:
+    try:
+        conn = get_db_connection()
+        # q wrapper: returns session boundaries + UTC offset from venueMap
+        result = conn.q(f'select from venueMap where venue=`{venue_code}')
+        return {"status": "success", "data": result.pd().to_dict(orient="records")}
+    except Exception as e:
+        logger.error(f"xqa_get_venue_hours failed: {e}")
+        return {"status": "error", "message": str(e)}
+```
+
+> **Tool naming:** All project-specific tools use the `xqa_` prefix. Built-in KX tools use `kdbx_`.
+
+### Tool Design Principles
+
+- Provide **general context**, not check-specific logic. The AI generates check logic dynamically.
+- Return raw data the AI can reason about — don't pre-filter to "interesting" rows.
+- Keep tool descriptions precise: the AI selects tools autonomously based on their `description` field.
+- q wrappers outperform SQL for large tick tables — use `conn.q(...)` not `kdbx_run_sql_query`.
+
+```python
+# Good: general-purpose, reusable
+Tool(name="xqa_get_venue_hours", description="Returns session hours and UTC offset for a venue.")
+
+# Avoid: too specific, not reusable
+Tool(name="check_data_outside_trading_hours", ...)
+```
+
+---
+
+## Writing Custom MCP Resources
+
+Every `.py` file in `src/mcp_server/resources/` is auto-discovered. Each must expose `get_resource()` and `get_content()`.
+
+```python
+# src/mcp_server/resources/xqa_trade_schema.py
+from mcp.server.models import Resource
+
+def get_resource() -> Resource:
+    return Resource(
+        uri="kdbx://xqa-trade-schema",
+        name="xqa_trade_schema",
+        description="Schema and column definitions for the trade table",
+        mimeType="text/markdown"
+    )
+
+async def get_content() -> str:
+    return """
+# trade table schema
+
+| Column | Type    | Description |
+|--------|---------|-------------|
+| date   | date    | Partition date |
+| sym    | symbol  | Instrument identifier (e.g. `7203.T`) |
+| time   | time    | Event timestamp in storage timezone (JST −1h) |
+| price  | float   | Trade price in local currency |
+| size   | long    | Trade size in shares |
+| code   | symbol  | Exchange condition code |
+| flag   | symbol  | Auction flag: `opening`, `closing`, or null for continuous |
+
+**Partitioning:** Table is date-partitioned. Always include `date` in WHERE clause.
+**Timezone:** Data is stored as JST −1h (UTC+8). Tokyo open 09:00 JST = 08:00 in data.
+**Sampling warning:** Do NOT sample this table. Use date + sym filters to scope queries.
+"""
+```
+
+Resources act as the AI's internal documentation. Explicit schema resources prevent malformed queries on large partitioned tables.
+
+---
+
+## Writing Custom MCP Prompts
+
+Every `.py` file in `src/mcp_server/prompts/` is auto-discovered. Each must expose `get_prompt()` and `get_content()`.
+
+```python
+# src/mcp_server/prompts/xqa_dq_analysis.py
+from mcp.server.models import Prompt, PromptArgument
+
+def get_prompt() -> Prompt:
+    return Prompt(
+        name="xqa_dq_analysis",
+        description="Generate a scoped DQ analysis prompt for a specific date and index",
+        arguments=[
+            PromptArgument(name="date",  description="Analysis date (YYYY-MM-DD)", required=True),
+            PromptArgument(name="index", description="Index name, e.g. TOPIX",      required=True),
+            PromptArgument(name="venue", description="Venue MIC code, e.g. XTKS",   required=True),
+        ]
+    )
+
+async def get_content(date: str, index: str, venue: str) -> str:
+    return f"""
+SCOPE:
+- Time period: ONLY USE DATA FOR {date}. DO NOT LOOK AT ANY OTHER DATES.
+- Symbols: use symbols from the {index} index (call xqa_get_index_syms)
+- trade table schema: date, sym, time, price, size, code, flag
+- quote table schema: date, sym, time, ask, asize, bid, bsize
+
+Answer the following questions:
+1. Are there any gaps in trade or quote data?
+2. Is the data distributed correctly across the {venue} trading sessions?
+3. Are there any null or negative values in price or size columns?
+4. Are there any crossed quotes (bid >= ask) during continuous trading hours?
+5. Are auction trades correctly flagged?
+6. Are trade and quote timestamps correctly aligned?
+
+Constraints:
+- Ensure ALL data is used (no sampling)
+- Always use date-partitioned queries (include `date={date}` in every query)
+- Call xqa_get_venue_hours for {venue} before applying any time filters
+- For gap detection: explicitly check 1-minute bins
+- For each finding, state exactly which data was used and how many rows were analyzed
+"""
 ```
 
 ---
@@ -195,7 +435,7 @@ Agentic-DQ-for-KDB/
 Checks whether data covers the expected trading sessions without gaps.
 
 **Approach:**
-- Use `xqa_get_venue_hours` to retrieve official trading hours and timezone offset
+- Call `xqa_get_venue_hours` to retrieve official trading hours and timezone offset
 - Convert venue local time to storage timezone before comparing (e.g., JST −1h = UTC+8)
 - Aggregate trade/quote counts by time period (pre-open, morning session, lunch, afternoon, post-close)
 - Flag sessions with zero or anomalously low record counts
@@ -209,57 +449,57 @@ Checks for temporal gaps and event ordering within trading sessions.
 **Approach:**
 - Bin trade/quote records into 1-minute intervals
 - Flag bins with zero records during expected continuous-trading windows
-- Cross-reference gaps against auction schedule (opening/closing auction periods may legitimately have sparse data)
+- Cross-reference gaps against auction schedule
 
 **Key lessons from whitepaper:**
 - Large gaps (30 min) are detected reliably by default
 - Small gaps (≤3 min) require explicit instruction: *"Check 1-minute bins and flag any minute with zero trades during continuous trading hours"*
-- The AI may misattribute gaps to auction periods even when auction config says otherwise — always verify against `xqa_get_venue_hours` auction timings
+- The AI may misattribute gaps to auction periods even when auction config says otherwise — always require a cross-check against `xqa_get_venue_hours` timings
 
 ### 3. Data Validation
 
 #### Bad Data (Nulls / Negatives)
 - Check `price` and `size` columns for null values and negative entries
 - Report count and percentage of affected records
-- The AI reliably identifies these when given the full dataset (not sampled)
+- Reliable only when the AI is given the full dataset — explicitly prevent sampling
 
 #### Crossed Quotes
 - During continuous trading, `bid < ask` must always hold
 - `bid >= ask` = crossed quote — indicates feed error or special market condition
 - On TSE, crossed quotes during auction periods are expected (special quotation mechanism)
-- Filter to continuous trading hours before flagging; use `xqa_get_venue_hours` for session boundaries
+- Always filter to continuous trading hours using `xqa_get_venue_hours` session boundaries
 
 #### Outliers
-- Detect price deviations >N standard deviations from rolling average
+- Detect price deviations >N standard deviations from rolling average using q's `mavg`/`mdev`
 - Provide context window (trades ±30 seconds around outlier) to confirm it is not a genuine market move
-- Common causes: fat-finger, data-feed glitch, decimal-point misplacement
+- Common causes: fat-finger input, data-feed glitch, decimal-point misplacement
 
 #### Duplicates
 - Reference tables (`stockCodes`, `venueMap`) must be checked for duplicates
 - Not all duplicates are errors — the AI should apply domain reasoning:
   - `stockCodes`: Duplicate ISINs/names may be cross-listings, ETF families, or multi-venue stocks
   - `venueMap`: Duplicate venue codes with different effective dates = operating hours change (valid)
-- Always confirm AI's reasoning with a domain expert
+- Always confirm AI's reasoning with a domain expert; the AI has been observed to give plausible-but-wrong explanations
 
 ### 4. Data Understanding
 
 #### Auction Classification
-- Auction trades should be flagged in a `flag` column with values `"opening"` / `"closing"`
-- Opening auction: concentrated execution at market open, typically 1-second window, large average size
+- Auction trades should be flagged in the `flag` column with values `"opening"` / `"closing"`
+- Opening auction: concentrated execution at market open, ~1-second window, large average size
 - Closing auction: similar characteristics at market close
 - Verify: auction trade count matches expected symbol count; average size >> continuous session trades
 
 #### Trade-Quote Alignment
-- Use q's `aj` (asof join) to align each trade with its immediately preceding quote
+- Use q's `aj` (asof join) via `xqa_align_trade_quote` to align each trade with its immediately preceding quote
 - A correctly aligned trade has `trade_price == bid` or `trade_price == ask`
 - Alignment degrades during high-volatility periods (market open/close) due to quote-to-trade ratio spikes
-- Quote-to-trade ratios >50:1 indicate high latency risk zones — flag these periods in the DQ report
+- Quote-to-trade ratios >50:1 indicate high latency risk zones — flag these periods
 
 ---
 
 ## Prompt Engineering for DQ Checks
 
-Effective prompts follow this structure (derived from whitepaper best practices):
+### Effective Prompt Structure
 
 ```
 SCOPE:
@@ -282,12 +522,12 @@ Constraints:
 
 | Rule | Why it matters |
 |---|---|
-| Always specify exact date(s) | Prevents the AI from querying unbounded time ranges → timeouts |
-| Always provide table schema | Prevents malformed queries against large tables |
-| Explicitly ban sampling | AI defaults to sampling large datasets; must be overridden |
+| Always specify exact date(s) | Prevents querying unbounded time ranges → timeouts |
+| Always provide table schema | Prevents malformed queries against large partitioned tables |
+| Explicitly ban sampling | AI defaults to sampling large datasets; must be overridden every time |
 | Use index symbols, not all symbols | Focuses analysis on the most liquid, representative instruments |
 | Add verification checkpoints | "State what data was used" forces the AI to confirm coverage |
-| Request date-partitioned queries | Critical for KDB-X performance on partitioned HDB tables |
+| Request date-partitioned queries | Critical for KDB-X performance on HDB tables |
 | Specify timezone in prompt | AI handles timezone math correctly when offset is explicit |
 | For gap detection: specify 1-min bins | AI misses small gaps without explicit granularity instruction |
 
@@ -309,7 +549,6 @@ Phase 2 — Problem Period Deep-Dive
 
 Phase 3 — Full Historical Scan
   • Requires distributed compute or pre-aggregated summary tables
-  • Or query optimisation at database level
   • Not achievable with standard MCP tool constraints ✗
 ```
 
@@ -317,34 +556,18 @@ Phase 3 — Full Historical Scan
 
 ## KDB+/q Conventions
 
-### Tool Implementation: q over SQL
+### q over SQL
 
-Custom MCP tools **must** be implemented as q-language wrappers, not SQL:
-- SQL via `kdbx_run_sql_query` is flexible but slow on millions of tick records
-- q direct calls offer significantly better performance on large datasets
-- Wrap q functions in Python using `pykx` and register them as MCP tools
+Custom MCP tools **must** use q, not SQL:
+- SQL via `kdbx_run_sql_query` caps at 1000 rows and is slow on tick data
+- q direct calls via `get_db_connection().q(...)` have no row cap and far better performance
 
 ```python
-# Preferred: q wrapper tool
-import pykx as kx
+from src.mcp_server.utils.db_connection import get_db_connection
 
-def xqa_get_venue_hours(venue_code: str) -> dict:
-    """Returns trading hours and UTC offset for the specified venue."""
-    result = kx.q(f'select from venueMap where venue=`{venue_code}')
-    return result.pd().to_dict(orient="records")
+conn = get_db_connection()
+result = conn.q('select count i by date from trade where date=2023.05.08')
 ```
-
-### Connection Management
-
-- Always use context managers or explicit `.close()` for KDB+ connections
-- Connection pooling is preferred for high-frequency DQ runs
-- Use `pykx` as the primary Python-KDB+ bridge; fall back to `qpython` only if unavailable
-
-### q Script Style
-
-- Namespace all DQ utilities under `.dq` (e.g., `.dq.checkNull`, `.dq.profileTable`)
-- Namespace custom MCP tool functions under `.xqa` (e.g., `.xqa.getVenueHours`)
-- Keep q scripts short; complex orchestration logic belongs in Python
 
 ### Key q Functions for DQ
 
@@ -357,18 +580,24 @@ def xqa_get_venue_hours(venue_code: str) -> dict:
 | `mavg`, `mdev` | Rolling statistics for outlier detection |
 | `count where null` | Null completeness checks |
 
-### Query Safety
+### q Namespace Conventions
 
-- Never interpolate user-supplied strings directly into q queries (injection risk)
-- Use parameterized IPC calls via `pykx` when passing Python values to q
-- Validate symbol names against `xqa_get_venue_syms` before using in queries
+- Namespace DQ functions under `.dq` (e.g., `.dq.checkNull`, `.dq.profileTable`)
+- Namespace custom MCP tool functions under `.xqa` (e.g., `.xqa.getVenueHours`)
+- Keep q scripts in `q/tools/` short; orchestration logic belongs in Python
 
 ### Timezone Handling
 
-KDB-X stores tick data in a configured "storage timezone" that may differ from the venue's local timezone. Always:
-1. Read the timezone offset from `venueMap` config via `xqa_get_venue_hours`
-2. Convert venue local trading hours to the storage timezone before applying time filters
-3. Document the offset in resource files and prompt context (e.g., "JST −1h = data stored in UTC+8")
+KDB-X stores tick data in a configured "storage timezone" that may differ from venue local time:
+1. Read the timezone offset from `venueMap` via `xqa_get_venue_hours`
+2. Convert venue local trading hours to storage timezone before applying time filters
+3. Document the offset in resource files (e.g., "JST −1h = data stored in UTC+8")
+
+### Query Safety
+
+- Never interpolate user-supplied strings directly into q queries (injection risk)
+- Validate symbol names against `xqa_get_venue_syms` before embedding in queries
+- All tools should be read-only — never execute insert/upsert/delete unless explicitly designed for remediation
 
 ---
 
@@ -376,58 +605,33 @@ KDB-X stores tick data in a configured "storage timezone" that may differ from t
 
 ### Model Selection
 
-- Default to `claude-sonnet-4-6` for all DQ analysis tasks (ExeQution Analytics validated Sonnet-class models for this use case)
+- Default to `claude-sonnet-4-6` for all DQ analysis tasks (Sonnet-class validated by ExeQution Analytics)
 - Use `claude-opus-4-6` for complex multi-step reasoning or ambiguous data patterns
 - Use `claude-haiku-4-5-20251001` only for high-volume, simple classification sub-tasks
 
-### MCP Tool Design Principles
+### Known AI Limitations (from whitepaper experiments)
 
-Tools should provide **general context**, not encode specific DQ logic:
-
-```python
-# Good: general-purpose, reusable context tool
-{
-    "name": "xqa_get_venue_hours",
-    "description": "Returns trading session hours, auction times, and UTC offset for a venue.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "venue_code": {"type": "string", "description": "Exchange code, e.g. XTKS"}
-        },
-        "required": ["venue_code"]
-    }
-}
-
-# Avoid: check-specific tool that can't be reused
-{
-    "name": "check_if_data_outside_trading_hours",  # Too specific
-    ...
-}
-```
-
-The AI generates specific check logic dynamically; tools give it the raw data and context to reason from.
-
-### MCP Resource Files
-
-Place context documents in `resources/` and register them with the MCP server:
-- Table schemas: column names, types, descriptions, known quirks
-- Venue guides: auction mechanics, condition code meanings, special quotation rules
-- Domain guides: what crossed quotes mean, how `aj` works, expected auction characteristics
-
-Explicit schema resources prevent the AI from issuing malformed queries against large tables.
+| Limitation | Mitigation |
+|---|---|
+| AI defaults to sampling large datasets | Explicitly instruct "use ALL data, no sampling" in every prompt |
+| Small gaps (≤3 min) missed by default | Instruct "check 1-minute bins explicitly" |
+| AI may misattribute gaps to auction periods | Require cross-check against `xqa_get_venue_hours` auction schedule |
+| AI gives plausible-but-wrong duplicate explanations | Human domain review is mandatory — treat AI reasoning as a starting point |
+| SQL timeouts on large tick tables | Use q-language tools exclusively for tick data |
+| Context window limits scope | Use phased analysis strategy (Phase 1 → 2 → 3) |
 
 ### Agentic DQ Loop
 
 ```
-1. User submits DQ prompt (with SCOPE block: date, symbols, schema, constraints)
+1. User submits DQ prompt (SCOPE: date, symbols, schema, constraints)
          │
-2. AI selects appropriate MCP tools (venue hours, index syms, schema resources)
+2. AI calls xqa_get_index_syms and xqa_get_venue_hours to establish context
          │
-3. AI calls tools iteratively, building context about the data
+3. AI calls tools iteratively, building understanding of the data shape
          │
 4. AI executes q-based analysis queries (partitioned, scoped, no sampling)
          │
-5. AI generates structured DQ report:
+5. AI produces structured DQ report:
          • Coverage summary (rows analyzed, symbol count, date range)
          • Findings per DQ category with severity (INFO / WARNING / CRITICAL)
          • Root cause assessment with domain reasoning
@@ -437,19 +641,6 @@ Explicit schema resources prevent the AI from issuing malformed queries against 
          │
 7. Confirmed issues escalate to alerting / remediation pipeline
 ```
-
-### Known AI Limitations (from whitepaper)
-
-Be aware of these failure modes and mitigate with prompt engineering:
-
-| Limitation | Mitigation |
-|---|---|
-| AI defaults to sampling large datasets | Explicitly instruct "use ALL data, no sampling" in every prompt |
-| Small gaps (≤3 min) missed in default analysis | Instruct "check 1-minute bins explicitly" |
-| AI may misattribute gaps to auction periods | Require AI to cross-check against venue auction schedule tool |
-| AI may give plausible-but-wrong explanations for duplicates | Build in verification checkpoints; human review is mandatory |
-| SQL queries timeout on large tick tables | Use q-language tools, never SQL for tick data at scale |
-| Context window limits scope to subset of symbols/dates | Use phased analysis strategy (Phase 1 → 2 → 3) |
 
 ---
 
@@ -467,16 +658,12 @@ Always develop on feature branches, never commit directly to `main`/`master`.
 
 ### Commit Messages
 
-Use the imperative mood with a short subject line (≤72 chars). Include a body when the change needs explanation:
-
 ```
 Add xqa_get_venue_hours MCP tool with timezone support
 
 Wraps venueMap table query to return session boundaries and UTC offset.
 Required by completeness and timestamp consistency DQ checks.
 ```
-
-Avoid vague messages like "fix stuff" or "update code".
 
 ### Git Push Protocol
 
@@ -489,55 +676,14 @@ git push -u origin <branch-name>
 
 ---
 
-## Environment Setup
-
-### Required Environment Variables
-
-```bash
-# Anthropic API
-ANTHROPIC_API_KEY=sk-ant-...
-
-# KDB-X Connection
-KDB_HOST=localhost
-KDB_PORT=5000
-KDB_USERNAME=
-KDB_PASSWORD=
-
-# MCP Server
-MCP_SERVER_PORT=8080
-
-# Optional: alerting
-SLACK_WEBHOOK_URL=
-```
-
-Copy `.env.example` to `.env` and fill in values. **Never commit `.env`.**
-
-### Installing Dependencies
-
-```bash
-# Recommended: use uv (manages Python + packages, used by KDB-X MCP Server)
-pip install uv
-uv sync                 # installs from pyproject.toml lock
-
-# Alternative:
-pip install -e ".[dev]"
-```
-
-### Running the MCP Server
-
-```bash
-# Start KDB-X MCP Server with custom tools
-uv run python -m agentic_dq.mcp.server --kdb-host localhost --kdb-port 5000
-```
-
-### Running Tests
+## Running Tests
 
 ```bash
 pytest tests/unit/                    # fast, no KDB-X required
 pytest tests/integration/ --kdb-live  # requires live KDB-X connection
 ```
 
-### Linting and Type Checking
+## Linting and Type Checking
 
 ```bash
 ruff check src/ tests/
@@ -547,48 +693,46 @@ mypy src/
 
 ---
 
-## Code Style and Quality
+## Code Style
 
-### Python
-
-- **Python 3.11+** minimum
-- All new modules must have type annotations
-- Use `ruff` for formatting and linting (replaces `black`, `isort`, `flake8`)
-- Use `mypy` in strict mode for the `src/` package
-- Avoid mutable default arguments, bare `except` clauses, and wildcard imports
-- Keep functions small and single-purpose; prefer composition over inheritance
-
-### Error Handling
-
-- Raise specific, descriptive exceptions (define custom exceptions in `exceptions.py` per package)
-- Never swallow exceptions silently; at minimum log them
-- KDB+ connection errors should be caught and retried with backoff before escalating
-
-### Logging
-
-- Use Python's `logging` module; configure via `logging.yaml` or at the app entry point
-- Log at `DEBUG` for MCP tool calls, `INFO` for DQ pipeline milestones, `WARNING`/`ERROR` for failures
-- Never log credentials, API keys, or raw query results that may contain PII
+- **Python 3.11+** minimum; all new modules must have type annotations
+- `ruff` for formatting and linting; `mypy` in strict mode for `src/`
+- Custom exceptions in `exceptions.py`; never swallow exceptions silently
+- Log at `DEBUG` for MCP tool calls, `INFO` for pipeline milestones, `WARNING`/`ERROR` for failures
+- Never log credentials, API keys, or raw query results containing PII
 
 ---
 
 ## Testing Guidelines
 
-- Unit tests must be fast and KDB-X-independent (mock the KDB+ connection layer)
-- Integration tests must be clearly marked and skipped by default unless a live KDB-X instance is available
-- Aim for >80% coverage on `src/agentic_dq/`
-- Tests for MCP tools should verify q query correctness against known fixture data
+- Unit tests must be fast and KDB-X-independent (mock `get_db_connection()`)
+- Integration tests must be skipped by default unless `--kdb-live` flag is passed
+- Aim for >80% coverage on `src/`
+- Tests for MCP tools should verify q query correctness against fixture data
 - Tests for DQ logic should inject known bad data (nulls, negatives, outliers) and assert correct detection
 
 ---
 
 ## Security Considerations
 
-- API keys and credentials are always loaded from environment variables, never hardcoded
+- API keys and credentials always loaded from environment variables, never hardcoded
 - q queries constructed from external input must be validated before execution
-- The agent must not be given write/delete permissions on KDB-X unless explicitly configured
-- Review any auto-remediation actions before enabling them in production
-- MCP tool descriptions must not expose internal table structures or connection details
+- The MCP server connects to KDB-X in **read-only mode** unless explicitly configured otherwise
+- MCP tool descriptions must not expose internal table structures or credentials
+- Review any auto-remediation actions before enabling in production
+
+---
+
+## Troubleshooting
+
+| Issue | Solution |
+|---|---|
+| `Failed to import pykx` | Set `QLIC` env var to your KDB+ license directory |
+| Connection timeout | Verify KDB+ is running: `q -p 5000` |
+| SQL interface error (KDB-X) | Run `.s.init[]` inside the q process |
+| Port in use | Change port: `uv run mcp-server --mcp.port 7001` |
+| Tools not appearing in Claude | Restart Claude Desktop after adding new tool files |
+| AI sampling despite instruction | Restate "no sampling, use ALL data" explicitly in the prompt |
 
 ---
 
